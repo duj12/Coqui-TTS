@@ -68,9 +68,10 @@ def wav_to_mel_cloning(
 
 def load_audio(audiopath, sampling_rate):
     # better load setting following: https://github.com/faroit/python_audio_loading_benchmark
-
     # torchaudio should chose proper backend to load audio depending on platform
-    audio, lsr = torchaudio.load(audiopath)
+    # audio, lsr = torchaudio.load(audiopath)   # not support m4a format
+    audio, lsr = librosa.load(audiopath, sr=sampling_rate, mono=True)
+    audio = torch.from_numpy(audio).unsqueeze(0)
 
     # stereo to mono if needed
     if audio.size(0) != 1:
@@ -331,7 +332,7 @@ class Xtts(BaseTTS):
         gpt_cond_chunk_len=6,
         librosa_trim_db=None,
         sound_norm_refs=False,
-        load_sr=22050,
+        load_sr=16000,
     ):
         """Get the conditioning latents for the GPT model from the given audio.
 
