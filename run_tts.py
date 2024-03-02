@@ -1,11 +1,26 @@
 import torch
-from TTS.api import TTS
 import os
+import json
+import subprocess
 from tqdm import tqdm
+from TTS.api import TTS
 from multiprocessing import Process
 
 max_ref_audio_per_speaker = 300  # 一个参考说话人最多使用300条音频，最多也生成300条音频
-min_ref_audio_filesize = 100 * 1024  # 参考音频最小文件大小。 100Kb~对应16k音频大约时长是3s.
+min_ref_audio_filesize = 100 * 1024  # 参考音频最小文件大小，100Kb~对应16k的wav音频大约时长是3s
+min_ref_audio_duration = 3.0        # 参考音频最短时长
+max_ref_audio_duration = 30.0       # 参考音频最大时长
+
+def get_file_duration(file_path):
+    ffprobe_cmd = f'ffprobe -v error -show_entries ' \
+                  f'format=duration -of json "{file_path}"'
+    result = subprocess.run(
+        ffprobe_cmd, capture_output=True, text=True, shell=True)
+    output = result.stdout
+    data = json.loads(output)
+    duration = float(data['format']['duration'])
+    return duration
+
 def main(args, spk2utts, gpu_id, start_idx, chunk_num):
     device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
     # Init TTS
@@ -52,6 +67,7 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser()
     p.add_argument('-s', '--speaker_file', type=str, required=True, help='spk2utt of reference audios')
     p.add_argument('-r', '--ref_audio', type=str, required=True, help='wav.scp of reference audios')
+    p.add_argument('-d', '--duration', type=str, required=True, help='wav2dur of reference audios')
     p.add_argument('-t', '--text_file', type=str, required=True, help='the absolute path of test file that is going to inference')
     p.add_argument('-l', '--language', type=str, required=True, help='the language of text.')
     p.add_argument('-o', '--output_dir', type=str, required=True, default=None, help='path to save the generated audios.')
@@ -66,7 +82,11 @@ if __name__ == '__main__':
     thread_per_gpu = int(args.num_thread)  # 4GB GPU memory per thread, bottleneck is CPU usage!!!
     thread_num = gpu_num * thread_per_gpu  # threads
 
-    total_len = 3600000  # len(wavs)
+    total_len = 0
+    with open(args.text_file) as fin:
+        for line in fin:
+            total_len += 1
+
     print(f"Total wavs: {total_len}, Thread nums: {thread_num}")
 
     speaker_file = args.speaker_file  # spk2utt 每个说话人对应的音频id
@@ -74,23 +94,46 @@ if __name__ == '__main__':
     text_file = args.text_file   # 文本
     output_dir = args.output_dir
 
+    wav2dur = {}
+    with open(args.duration, 'r', encoding='utf-8') as fin:
+        for line in fin:
+            line = line.strip().split()
+            if not len(line) == 2:
+                continue
+            wav, dur = line[0], float(line[1])
+            wav2dur[wav] = dur
+    print(f"Load wav2dur finished, total utts: {len(wav2dur)}")
     # 得到每个说话人对应的参考音频路径
     utt2path = {}
     with open(ref_audio, 'r', encoding='utf-8') as fin:
         for line in fin:
-            line = line.strip().split(maxsplit=1)
-            if len(line) != 2:
-                print(f"{line} format error, you should supply kaldi format wav.scp.")
+            try:
+
+                line = line.strip().split(maxsplit=1)
+                if len(line) != 2:
+                    print(f"{line} format error, you should supply kaldi format wav.scp.")
+                    continue
+                utt = line[0]
+                path = line[1]
+                # if not os.path.exists(path):
+                #     print(f"wav path: {path} not exist.")
+                #     continue
+                # if os.path.getsize(path) < min_ref_audio_filesize:
+                #     # print(f"wav path: {path} not bigger than {min_ref_audio_filesize} byte.")
+                #     continue
+                if not utt in wav2dur:
+                    continue
+
+                duration = wav2dur[utt]
+                if duration < min_ref_audio_duration or \
+                        duration > max_ref_audio_duration:
+                    continue
+                utt2path[utt] = path
+            except Exception as e:
+                print(f"Get reference audio error: {e}")
+                print(f"{line}")
                 continue
-            utt = line[0]
-            path = line[1]
-            if not os.path.exists(path):
-                print(f"wav path: {path} not exist.")
-                continue
-            if os.path.getsize(path) < min_ref_audio_filesize:
-                # print(f"wav path: {path} not bigger than {min_ref_audio_filesize} byte.")
-                continue
-            utt2path[utt] = path
+    print(f"Load wav.scp finished, total utts: {len(utt2path)}")
 
     spk2utts = {}
     with open(speaker_file, 'r', encoding='utf-8') as fin:
